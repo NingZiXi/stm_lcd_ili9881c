@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.16)
+project(ili9881c_host_tests C)
+enable_testing()
+add_subdirectory(.. component)
+add_executable(test_panel test_panel.c)
+target_link_libraries(test_panel PRIVATE stm_lcd_ili9881c)
+add_test(NAME panel_commands COMMAND test_panel)
