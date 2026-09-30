@@ -1,22 +1,27 @@
-# STM32 HAL 接入示例
+# lcd_ili9881c：STM32 HAL 接入示例
 
-在 CubeMX 中启用 DSI Host 双通道及对应的 LTDC RGB565，并为屏幕供电、复位和背光配置 GPIO；先初始化 SDRAM、DSI 与 LTDC，再使用以下代码。用户须按实际电路实现三个板级函数，不要将 GPIO 引脚写进芯片组件。`tx_param` 对无参数 DCS 用 short write；带参数的命令按参数长度选 short/long write。
+本目录提供可复制到已有 HAL 应用的 `example.c` / `example.h`，不是完整 CubeMX 工程。先初始化板级时钟、GPIO 和总线，再传入实际 HAL 句柄/引脚。代码使用 STM32H7 HAL，其他系列自行替换头文件；示例不会自动编入组件库。
 
-```c
-static int panel_tx(void *io, uint8_t cmd, const uint8_t *data, size_t length);
-static void panel_delay(void *io, uint32_t ms);
-static void panel_reset(void *io, int high);
+当前示例对应未发布的新 API；软件验证通过后仍需按实物回归。v0.1.0 已在 H757 配套模组验证颜色、LVGL 刷新与连续复位；本次 API 迁移尚未实板回归。
 
-stm_lcd_ili9881c_t panel = {0};
-stm_lcd_ili9881c_config_t cfg = {
-    .tx_param = panel_tx, .delay_ms = panel_delay, .reset = panel_reset,
-};
-if (stm_lcd_ili9881c_new_panel(&panel, &cfg) == 0 &&
-    stm_lcd_ili9881c_init(&panel) == 0) {
-    /* 然后打开板级背光；像素由 LTDC 帧缓冲提供。 */
-}
+## 接入步骤
+
+1. 将组件和 stm_common 加入 CMake；LVGL port 先提供 LVGL 9 target。
+2. 将本目录两个源码文件复制到应用，替换 HAL 头文件和实际板级参数。
+3. 以 NULL 初始化句柄，按 example.h 的 start 接口创建；板级结构体必须持久有效。
+4. 循环绘图/读取触点或调用 LVGL handler，检查每一步 `err != STM_OK`。
+5. 停止所有访问后调用 `lcd_ili9881c_delete(&handle)`。
+
+```cmake
+target_sources(your_firmware PRIVATE App/example.c)
+target_include_directories(your_firmware PRIVATE App)
+target_link_libraries(your_firmware PRIVATE stm_lcd_ili9881c)
 ```
 
-直接可构建的 DSI/LTDC、GPIO 时序、LVGL 刷新参考 STM32H757 主工程 `examples/display_lvgl_demo.c`（使用 `STM_DISPLAY_LVGL_DEMO=ON`）。
+HAL_TIMEOUT 映射为 STM_ERR_TIMEOUT，HAL_ERROR/HAL_BUSY 映射为 STM_ERR_IO，start 失败保留首个错误并回收本次创建的对象，重复 start 不覆盖已有句柄。传输同步完成后才能复用缓冲；阻塞 API 不从中断调用。
 
-`example.c` 提供 HAL DSI 传输回调与初始化函数；请先按板级时序启动 DSI，调用 `example_ili9881c_start()` 后再开启背光。
+## DSI 板级填写
+
+板级先完成 DSI/LTDC、SDRAM 帧缓冲与电源初始化，填 lcd_ili9881c_example_board_t 的 dsi/reset_port/reset_pin。start(&panel,&board) 按 create → reset → init 执行一次复位；成功后才打开背光。原 RST 1/5ms → 0/10ms → 1/120ms 和命令表保持原值。驱动仅适用已测 WKS101HD031-WCT 模组初始化，不提供通用 DSI 时序或自动帧缓冲。
+
+完整 API、错误和资源契约见[中文主页](../../README.md)。

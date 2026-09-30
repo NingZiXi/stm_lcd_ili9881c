@@ -1,5 +1,6 @@
+/** @file stm_lcd_ili9881c.c @brief 面板命令与实例生命周期。 */
 #include "stm_lcd_ili9881c.h"
-#include <string.h>
+#include <stdlib.h>
 /* Panel-specific register values transcribed from board vendor experiment 13,
  * ili9881c10_init_cmd_tbl; do not apply to other ILI9881C modules blindly. */
 typedef struct { uint8_t command, length, data[3]; } init_cmd_t;
@@ -196,34 +197,69 @@ static const init_cmd_t init_commands[] = {    {0xFF, 3, {0x98, 0x81, 0x03}},
     {0xD2, 1, {0x6B}},
     {0xD3, 1, {0x3F}},
 };
-int stm_lcd_ili9881c_new_panel(stm_lcd_ili9881c_t *panel, const stm_lcd_ili9881c_config_t *cfg) {
-    if (!panel || !cfg || !cfg->tx_param || !cfg->delay_ms) return -1;
-    memset(panel, 0, sizeof(*panel)); panel->config = *cfg; panel->created = 1; return 0;
+struct lcd_ili9881c_context { lcd_ili9881c_config_t config; uint8_t initialized; };
+stm_err_t lcd_ili9881c_create(const lcd_ili9881c_config_t *config, lcd_ili9881c_handle_t *out)
+{
+    if (!config || !out) return STM_ERR_INVALID_ARG;
+    if (*out) return STM_ERR_INVALID_STATE;
+    if (!config->tx_param || !config->delay_ms) return STM_ERR_INVALID_CONFIG;
+    lcd_ili9881c_handle_t panel = calloc(1, sizeof(*panel));
+    if (!panel) return STM_ERR_NO_MEM;
+    panel->config = *config;
+    *out = panel;
+    return STM_OK;
 }
-int stm_lcd_ili9881c_init(stm_lcd_ili9881c_t *panel) {
-    static const uint8_t page0[3] = {0x98, 0x81, 0x00};
-    static const uint8_t tear_on = 0;
-    size_t i;
-    if (!panel || !panel->created) return -1;
+stm_err_t lcd_ili9881c_delete(lcd_ili9881c_handle_t *handle)
+{
+    if (!handle) return STM_ERR_INVALID_ARG;
+    free(*handle);
+    *handle = NULL;
+    return STM_OK;
+}
+stm_err_t lcd_ili9881c_reset(lcd_ili9881c_handle_t panel)
+{
+    if (!panel) return STM_ERR_INVALID_ARG;
     panel->initialized = 0;
-    if (panel->config.reset) {
-        panel->config.reset(panel->config.io, 1); panel->config.delay_ms(panel->config.io, 5);
-        panel->config.reset(panel->config.io, 0); panel->config.delay_ms(panel->config.io, 10);
-        panel->config.reset(panel->config.io, 1); panel->config.delay_ms(panel->config.io, 120);
-    }
-    for (i = 0; i < sizeof(init_commands) / sizeof(init_commands[0]); ++i) {
-        const init_cmd_t *cmd = &init_commands[i];
-        if (panel->config.tx_param(panel->config.io, cmd->command, cmd->data, cmd->length)) return -2;
-    }
-    if (panel->config.tx_param(panel->config.io, 0xff, page0, 3) ||
-        panel->config.tx_param(panel->config.io, 0x35, &tear_on, 1) ||
-        panel->config.tx_param(panel->config.io, 0x11, NULL, 0)) return -2;
+    if (!panel->config.reset) return STM_OK;
+    stm_err_t err;
+    err = panel->config.reset(panel->config.io, 1);
+    if (err != STM_OK) return err;
+    panel->config.delay_ms(panel->config.io, 5);
+    err = panel->config.reset(panel->config.io, 0);
+    if (err != STM_OK) return err;
+    panel->config.delay_ms(panel->config.io, 10);
+    err = panel->config.reset(panel->config.io, 1);
+    if (err != STM_OK) return err;
     panel->config.delay_ms(panel->config.io, 120);
-    if (panel->config.tx_param(panel->config.io, 0x29, NULL, 0)) return -2;
-    panel->config.delay_ms(panel->config.io, 120);
-    panel->initialized = 1; return 0;
+    return STM_OK;
 }
-int stm_lcd_ili9881c_display_on_off(stm_lcd_ili9881c_t *panel, int on) {
-    if (!panel || !panel->initialized) return -1;
-    return panel->config.tx_param(panel->config.io, on ? 0x29 : 0x28, NULL, 0) ? -2 : 0;
+stm_err_t lcd_ili9881c_init(lcd_ili9881c_handle_t panel)
+{
+    if (!panel) return STM_ERR_INVALID_ARG;
+    panel->initialized = 0;
+    stm_err_t err;
+    for (size_t i = 0; i < sizeof(init_commands) / sizeof(init_commands[0]); ++i) {
+        const init_cmd_t *op = &init_commands[i];
+        err = panel->config.tx_param(panel->config.io, op->command, op->data, op->length);
+        if (err != STM_OK) return err;
+    }
+    static const uint8_t page0[3] = {0x98, 0x81, 0x00}, tear_on = 0;
+    err = panel->config.tx_param(panel->config.io, 0xff, page0, 3);
+    if (err != STM_OK) return err;
+    err = panel->config.tx_param(panel->config.io, 0x35, &tear_on, 1);
+    if (err != STM_OK) return err;
+    err = panel->config.tx_param(panel->config.io, 0x11, NULL, 0);
+    if (err != STM_OK) return err;
+    panel->config.delay_ms(panel->config.io, 120);
+    err = panel->config.tx_param(panel->config.io, 0x29, NULL, 0);
+    if (err != STM_OK) return err;
+    panel->config.delay_ms(panel->config.io, 120);
+    panel->initialized = 1;
+    return STM_OK;
+}
+stm_err_t lcd_ili9881c_display_on_off(lcd_ili9881c_handle_t panel, int on)
+{
+    if (!panel || (on != 0 && on != 1)) return STM_ERR_INVALID_ARG;
+    if (!panel->initialized) return STM_ERR_INVALID_STATE;
+    return panel->config.tx_param(panel->config.io, on ? 0x29 : 0x28, NULL, 0);
 }
