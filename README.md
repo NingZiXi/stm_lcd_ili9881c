@@ -1,71 +1,99 @@
-# stm_lcd_ili9881c：ILI9881C DSI 面板驱动
+# stm_lcd_ili9881c：ILI9881C 通用面板驱动
 
-管理 DCS 初始化和开关显示，命令表来自慧勤智远实验 13 的 WKS101HD031-WCT 10.1 寸 800×1280 模组。来源保留，按维护者确认的 MIT 条款公开；不保证适用于其他 ILI9881C 模组。DSI/LTDC、上电、背光和帧缓冲由板级管理。
+DCS 初始化表来自慧勤智远实验 13 的 WKS101HD031-WCT 10.1 寸 800×1280 模组。来源保留，按维护者确认的 MIT 条款公开，不保证适用于其他 ILI9881C 模组。 构造函数返回 `stm_lcd_panel_handle_t`，应用通过 `stm_lcd_panel_*` 使用；不保留旧芯片句柄包装。板级拥有总线、供电、背光与 GPIO；DSI/LTDC 时序和扫描帧缓冲不写入芯片驱动。
 
-## 最小调用
+## 🤖 让 Agent 帮助接入
+
+> 将 `stm_lcd_ili9881c` 接入当前工程。先读 AGENTS.md、README、公开头和 HAL 示例，核对 MCU、器件、总线、引脚及尺寸/方向，保留已有改动，不猜接线。使用通用句柄和配套本地框架，按组件协议提供 IO，不增加芯片专用 LVGL 包装。报告实际源码版本、软件验证和未验证项，未经确认不烧录或发布。
+
+## 最小接入
+
+先由板级初始化持续有效的通用 IO（HAL 示例已提供适配函数），再创建设备：
 
 ```c
-lcd_ili9881c_handle_t panel = NULL;
-lcd_ili9881c_config_t cfg = {
-    .tx_param=board_dsi_send, .reset=board_reset, .delay_ms=board_delay_ms, .io=&board_io,
+stm_lcd_panel_handle_t panel = NULL;
+lcd_ili9881c_config_t config =
+{
+    .io = &board_io,
+    .width = board_width,
+    .height = board_height,
+    .delay_ms = board_delay,
+    .reset = board_reset,
+    .control_context = &board,
 };
-stm_err_t err = lcd_ili9881c_create(&cfg, &panel);
-if (err == STM_OK) err = lcd_ili9881c_reset(panel);
-if (err == STM_OK) err = lcd_ili9881c_init(panel);
-if (err != STM_OK) lcd_ili9881c_delete(&panel);
-/* 初始化成功后由板级打开背光；退出时 lcd_ili9881c_delete(&panel)。 */
+stm_err_t err = lcd_ili9881c_create(&config, &panel);
+if (err == STM_OK)
+{
+    err = stm_lcd_panel_reset(panel);
+}
+if (err == STM_OK)
+{
+    err = stm_lcd_panel_init(panel);
+}
+// 成功后创建 port；没有复位回调时跳过 reset，由板级保证已复位。
 ```
 
-## 错误与资源契约
+复位和初始化开始即清除就绪状态，中途失败不允许绘图或显示控制，可重试初始化。参数检查失败不访问硬件；绘图失败停止后续传输，不回滚已经发送的像素，也不自动重试。
 
-所有操作和传输/复位回调返回 `stm_err_t`，成功为 `STM_OK`，失败检查 `err != STM_OK`，不能使用 `err < 0`。HAL 适配将 `HAL_TIMEOUT` 映射为 `STM_ERR_TIMEOUT`，`HAL_ERROR/HAL_BUSY` 映射为 `STM_ERR_IO`；组件原样传递回调错误，延时回调仍返回 void。
+## DSI 命令与可选帧缓冲能力
+
+IO 必须提供同步 `tx_param`。`reset` 保留 1/5 ms → 0/10 ms → 1/120 ms，`init` 不隐式复位；原 DCS 命令表、Sleep Out/Display On 和 120 ms 延时不变。
+
+ILI9881C 的 DSI 命令口本身不等于像素传输。每个实例按其 IO 实际能力提供：
+
+| 平台 IO | 面板/port 用法 |
+| --- | --- |
+| 仅 `tx_param` | 允许 DCS 初始化；绘图/切帧返回 NOT_SUPPORTED，port 创建拒绝 |
+| 加 `draw_region` | 默认 PARTIAL；同步复制紧密 RGB565 局部矩形至平台扫描帧缓冲 |
+| 加 `present/process/busy/stop_scanout` | DIRECT；两个完整 RGB565 帧，经 VSYNC 安全切换 |
+
+驱动不实现假成功的绘图、不创建 framebuffer、不处理 LTDC/DSI 时钟或 DCache。`draw_region` 返回前用完输入；`present` 完成代表旧扫描帧可重用，新帧仍借用至下次切换或停止扫描。停止失败保留对象和缓冲。只有实现全部能力才声明支持 DIRECT，具体责任见新版 port 的 `docs/render-modes.md`。
+
+## 从 v0.2.0 迁移
+
+| v0.2.0 | 当前工作区 |
+| --- | --- |
+| `lcd_ili9881c_handle_t` | `stm_lcd_panel_handle_t` |
+| 配置中的芯片传输回调与 `void *io` | `.io` 借用通用 IO，控制回调使用 `.control_context` |
+| `lcd_ili9881c_reset/init/display_on_off` | `stm_lcd_panel_reset/init/display_on_off` |
+| 芯片绘图/窗口接口（支持时） | `stm_lcd_panel_draw_bitmap/set_window`，右下边界不包含 |
+| `lcd_ili9881c_delete(&handle)` | `stm_lcd_panel_delete(&handle)` |
+
+```cmake
+add_subdirectory(Lib/stm_lcd) # 本次迁移使用匹配的本地框架
+add_subdirectory(Lib/stm_lcd_ili9881c)
+# 提供 LVGL 9 target 或 lv_conf.h 和离线来源后：
+add_subdirectory(Lib/stm_lvgl_port)
+target_link_libraries(your_firmware PRIVATE stm_lcd_ili9881c stm_lvgl_port)
+```
+
+## 生命周期与错误
+
+`create` 要求输出句柄初始为 `NULL`，仅分配小型控制对象、复制配置并借用 IO，不访问硬件。创建失败不发布实例；非空输出返回 `STM_ERR_INVALID_STATE` 并保留原值。回调和上下文必须持续有效，IO、HAL、GPIO 与像素缓冲归应用所有。
+
+删除顺序为 port → 设备 → IO → HAL/外部缓冲。删除空句柄成功，空句柄地址返回 `STM_ERR_INVALID_ARG`；被借用、正在传输或回调期间拒绝删除，实例保留供后续服务/重试。应用串行调用，禁止 ISR/递归访问；删除后自行清除其他别名。
+
+所有操作/复位/传输回调返回 `stm_err_t`，以 `err != STM_OK` 判断错误，底层错误原样传递。延时回调保持 `void`。HAL 示例映射 `HAL_TIMEOUT` 为 `STM_ERR_TIMEOUT`，`HAL_ERROR/HAL_BUSY` 为 `STM_ERR_IO`。
 
 | 情况 | 错误 |
 | --- | --- |
-| 空参数、非法调用参数 | `STM_ERR_INVALID_ARG` |
-| 缺少必需回调、尺寸或方向配置错误 | `STM_ERR_INVALID_CONFIG` |
-| 输出句柄非空、面板未初始化 | `STM_ERR_INVALID_STATE` |
-| 控制对象/LVGL 对象分配失败 | `STM_ERR_NO_MEM` |
-| 绘图越界或像素长度计算溢出 | `STM_ERR_OUT_OF_RANGE` |
-| GT9271 ID 不匹配 | `STM_ERR_NOT_SUPPORTED` |
-| 触摸帧点数等数据校验失败 | `STM_ERR_VERIFY` |
+| 空指针、空或倒置矩形、非法调用参数 | `STM_ERR_INVALID_ARG` |
+| 缺少必需 IO 能力、尺寸/布尔配置非法 | `STM_ERR_INVALID_CONFIG` |
+| 重复创建、未初始化、对象被借用或操作在途 | `STM_ERR_INVALID_STATE` |
+| 控制对象分配失败 | `STM_ERR_NO_MEM` |
+| 绘图越界或字节数溢出 | `STM_ERR_OUT_OF_RANGE` |
+| 未实现的可选能力 | `STM_ERR_NOT_SUPPORTED` |
+| 协议点数/触点 ID 校验失败 | `STM_ERR_VERIFY` |
 
-`create(config, &handle)` 要求 handle 初始为 NULL；复制配置，用 calloc/free 管理小型控制对象，芯片 create 不访问硬件。创建失败保持输出为空；非空输出被拒绝且原值不变。`delete(&handle)` 仅回收拥有的对象，成功清空 handle，空句柄也成功；NULL 句柄地址是参数错误。删除前停止并发访问，其他别名不会被自动清空。
+## CMake 与离线依赖
 
-板级拥有 HAL、总线、GPIO、背光、外部缓冲和回调上下文；组件不释放或重新配置这些资源。实例使用期间上下文必须有效，可用 NULL io 表示无上下文。应用串行调用，组件不默认线程安全，不在中断中调用阻塞操作，不增加日志/RTT/RTOS 依赖。同步传输返回前必须用完输入缓冲；共享总线在整笔事务外加锁，DMA/DCache 一致性由板级管理。
+公开链接 `stm_common` 与 `stm_lcd`，核心不依赖 HAL、LVGL 或日志。`stm_common` 解析顺序为已有 target → 同级源码 → 固定 v1.0.0 提交 `ce3d186dde2d374a8e9c7b9068a7b88f97d57dc1`；自动获取支持 `FETCHCONTENT_SOURCE_DIR_STM_COMMON` 离线覆盖、`STM_COMMON_FETCH=OFF` 和 `STM_COMMON_GIT_REPOSITORY` 镜像。
 
-## 初始化与失败状态
+`stm_lcd` 解析顺序为已有 target → `STM_LCD_SOURCE_DIR` → `FETCHCONTENT_SOURCE_DIR_STM_LCD` → 同级源码 → 固定 v1.0.0 提交 `c359e54a657be38aec90c797ea19ee3d492d9284`。`STM_LCD_FETCH=OFF` 禁止下载；`STM_LCD_GIT_REPOSITORY` 可指向 GitHub/Gitee 镜像，默认固定 SHA 不改变。无效显式目录直接报错，不退回网络；多个组件使用同一 `stm_lcd` target/FetchContent 名称。
 
-init 不再隐式 reset；应用按 create → reset → init 调用一次复位，RST 保持原有 1/5ms → 0/10ms → 1/120ms，命令序列与延时不变。无 reset 回调时由板级保证实际复位。
+当前迁移组合的 ILI9881C、FT5206、GT9271 与新版 port 使用尚未发布的帧缓冲/原子寄存器扩展，**必须一起提供匹配的 `stm_lcd` 源码（聚合仓库 gitlink 固定）**；已发布 v1.0.0 不具备这些能力，配置时明确报错。ST7789/ST7796 核心仍可使用该正式框架的同步接口。依赖不自动追踪 main，也不伪造未来版本 SHA。
 
-复位/初始化开始后未就绪，失败保持未就绪，可重新初始化；仅初始化成功后允许开关显示。tx_param 是同步 DCS 回调，长度以字节计，length=0 时 data 可空；回调返回前使用完输入，错误原样返回，不自动重试。
-
-## CMake 与依赖
-
-依赖 `stm_common` 的 `stm_err.h`，不复制公共错误码。优先复用已有 `stm_common` target，其次找同级源码；缺失时自动下载固定 v1.0.0 提交 `ce3d186dde2d374a8e9c7b9068a7b88f97d57dc1`。可设置 `STM_COMMON_FETCH=OFF` 禁止下载，`STM_COMMON_GIT_REPOSITORY=https://gitee.com/nzxhg/stm_common.git` 指定镜像，或 `FETCHCONTENT_SOURCE_DIR_STM_COMMON` 指定离线源码。已有 target/同级源码无需网络。
-
-```cmake
-add_subdirectory(Lib/stm_lcd_ili9881c)
-target_link_libraries(your_firmware PRIVATE stm_lcd_ili9881c)
-```
-
-手动集成时添加组件 include/源码及 stm_common 头文件目录。LVGL port 还要求应用提前提供 LVGL 9 的 `lvgl` target 和配置。
-
-## 从 v0.1.0 迁移
-
-| 旧接口 | 当前接口 |
-| --- | --- |
-| `stm_lcd_ili9881c_t` 公开结构体 | `lcd_ili9881c_handle_t`，初始 NULL |
-| `stm_lcd_ili9881c_config_t` | `lcd_ili9881c_config_t` |
-| `new_panel(实例地址, config)` | `lcd_ili9881c_create(config, &handle)` |
-| 直接访问结构体 / 无销毁接口 | `lcd_ili9881c_delete(&handle)` |
-| int 与负数错误码 | `stm_err_t`，`err != STM_OK`，回调同步迁移 |
-
-其他操作使用 lcd_<型号> 前缀。
-
-2026-10-07，`v0.2.0` 接口在 STM32H757XIH6 CB V1.0、WKS101HD031-WCT 10.1 寸 800×1280 模组（ILI9881C/GT9271）、LVGL 9.3.0 上完成回归：诊断显示持续刷新、按钮与触摸输入、五次连续软件复位及 Release 启动通过；官方 Widgets 的滑动、点击由用户现场确认正常，读取状态中刷新、输入和切帧错误均为 0。板级使用 RGB565 DIRECT 双缓冲，触摸 mirror_x=0、mirror_y=0；结论限于该组合，不代表其他模组已验证。
-
-## 软件验证与发布状态
+## 软件验证与版本边界
 
 ```sh
 cmake -S tests -B build/tests -G Ninja -DCMAKE_BUILD_TYPE=Debug
@@ -73,6 +101,14 @@ cmake --build build/tests
 ctest --test-dir build/tests --output-on-failure
 ```
 
-主机测试覆盖参数/配置、分配失败、资源回收、多实例和错误传递，并编译 C11/C++17 公共头文件。测试分配器仅用于测试构建，不加入产品固件。中文 HAL 示例见 [examples/stm32_hal/README.md](examples/stm32_hal/README.md)。许可证见 [LICENSE](LICENSE)。
+测试保留原协议用例，补充通用句柄、空参数/非法配置、重复创建、分配失败、借用回滚、删除重建、多实例与错误传递；公共头按 C11/C++17 消费。中文 HAL 示例见 [examples/stm32_hal](examples/stm32_hal/README.md)。同级新版 port 的集成测试将五种器件交给同一份 port 源码，并检查 PARTIAL/DIRECT 及失败路径。
 
-`v0.2.0` 采用不透明句柄、`create/delete` 和统一 `stm_err_t`，包含破坏性接口迁移，不保留旧接口包装。`v0.1.0` 继续保留；升级前按上表迁移类型、回调和生命周期。此版本的主机测试、C11/C++17 头文件、中文 HAL 示例及 H757 Debug/Release 集成构建已通过。
+当前提交是尚未发布新版本的通用接口迁移，原 `v0.2.0` tag 保留原 API，未发布新 tag 或 Release。
+
+2026-10-11，匹配的本地 stm_lcd、ILI9881C、GT9271、stm_lvgl_port 和 LVGL 9.3.0 在 H757 配套 10.1 寸模组上通过 DIRECT 诊断 Debug 回归：800×1280 RGB565、DSI 两通道、板级 DMA2D，ST-Link 双核烧录独立读回、刷新持续推进、触摸/按钮事件和五次软件复位均正常，用户确认画面与触摸正常。触摸板级使用 PB10/PB11 软件 I2C，7 位地址 0x5d，mirror_x/y=0。
+
+本次未重新验证 PARTIAL、Release、Widgets、掉电复位或长期稳定性，未独立量化各角坐标；HAL 硬件 I2C 示例仍为编译验证。其他模组/平台不在本次实板范围内，旧 tag 的验收结果不移用。固件、源码哈希和硬件日志留在消费工程本地构建目录。
+
+## 许可证
+
+[MIT](LICENSE)，保留维护者和既有来源说明。

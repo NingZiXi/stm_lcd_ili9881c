@@ -1,27 +1,31 @@
-# lcd_ili9881c：STM32 HAL 接入示例
+# ILI9881C STM32 HAL 接入示例
 
-本目录提供可复制到已有 HAL 应用的 `example.c` / `example.h`，不是完整 CubeMX 工程。先初始化板级时钟、GPIO 和总线，再传入实际 HAL 句柄/引脚。代码使用 STM32H7 HAL，其他系列自行替换头文件；示例不会自动编入组件库。
+源码为 [example.c](example.c) 和 [example.h](example.h)，使用真实 STM32H7 HAL 头文件；消费工程需先完成 DSI、LTDC、供电/背光、逻辑尺寸、可选 RST，以及平台像素/扫描能力。 示例不猜引脚、时钟或屏幕通道。
 
-当前示例对应未发布的新 API；软件验证通过后仍需按实物回归。v0.1.0 已在 H757 配套模组验证颜色、LVGL 刷新与连续复位；本次 API 迁移尚未实板回归。
+## 添加与启动
 
-## 接入步骤
+将 `example.c` 编入消费工程，并添加本目录 include，链接 `stm_lcd_ili9881c` 与实际 HAL target。组件间依赖按[组件 README](../../README.md)设置，使用本次迁移匹配的本地框架。
 
-1. 将组件和 stm_common 加入 CMake；LVGL port 先提供 LVGL 9 target。
-2. 将本目录两个源码文件复制到应用，替换 HAL 头文件和实际板级参数。
-3. 以 NULL 初始化句柄，按 example.h 的 start 接口创建；板级结构体必须持久有效。
-4. 循环绘图/读取触点或调用 LVGL handler，检查每一步 `err != STM_OK`。
-5. 停止所有访问后调用 `lcd_ili9881c_delete(&handle)`。
-
-```cmake
-target_sources(your_firmware PRIVATE App/example.c)
-target_include_directories(your_firmware PRIVATE App)
-target_link_libraries(your_firmware PRIVATE stm_lcd_ili9881c)
+```c
+static lcd_ili9881c_example_board_t board; // 初始化硬件字段；内嵌 IO 首次必须为零。
+static stm_lcd_panel_handle_t device = NULL;
+// 填写 board 的 HAL、引脚、尺寸等实际配置后：
+stm_err_t err = lcd_ili9881c_example_start(&device, &board);
+// 成功时把通用句柄传给 port；板级 board 不得离开作用域。
 ```
 
-HAL_TIMEOUT 映射为 STM_ERR_TIMEOUT，HAL_ERROR/HAL_BUSY 映射为 STM_ERR_IO，start 失败保留首个错误并回收本次创建的对象，重复 start 不覆盖已有句柄。传输同步完成后才能复用缓冲；阻塞 API 不从中断调用。
+`example_start` 建立通用 IO、创建设备、可选硬复位；面板还执行 init。失败回收本次拥有的设备和 IO，HAL/引脚/帧缓冲归应用。HAL_TIMEOUT → TIMEOUT，HAL_ERROR/HAL_BUSY → IO，驱动不吞错误。
 
-## DSI 板级填写
+## LTDC/DSI 平台操作
 
-板级先完成 DSI/LTDC、SDRAM 帧缓冲与电源初始化，填 lcd_ili9881c_example_board_t 的 dsi/reset_port/reset_pin。start(&panel,&board) 按 create → reset → init 执行一次复位；成功后才打开背光。原 RST 1/5ms → 0/10ms → 1/120ms 和命令表保持原值。驱动仅适用已测 WKS101HD031-WCT 模组初始化，不提供通用 DSI 时序或自动帧缓冲。
+`board.platform_ops` 提供 `draw_region`，或提供完整的 `present/process/busy/stop_scanout`。示例复制该表到 `board.ops` 并替换命令函数为真实 HAL DSI DCS 调用；所有平台回调的 context 为 `lcd_ili9881c_example_board_t *`，通过其 `platform_context` 取板级 LTDC 状态。
 
-完整 API、错误和资源契约见[中文主页](../../README.md)。
+PARTIAL 回调同步复制 `[x1,x2) × [y1,y2)` 紧密 RGB565 输入至板级 framebuffer，处理行跨度/缓存，返回前用完输入。DIRECT 提交完整帧；VSYNC IRQ 只记录邮箱，主循环确认旧帧停止扫描后调用 `stm_lcd_io_complete(&board.io, result)` 恰好一次。成功后新帧继续被扫描；`busy` 只表示在途换帧，不能把持续扫描当成一直忙。`stop_scanout` 成功后 HAL 不得再引用任意缓冲。
+
+不能用空成功函数代替像素能力；只有 DCS 能力时可初始化屏幕，但 port 创建会拒绝。`example_stop` 会先停止扫描，失败时保留设备/IO。具体缓存、VSYNC、双缓冲契约见新版 port 的渲染说明。
+
+## 接入同一个 LVGL port 与退出
+
+port 配置直接填写 `.io`、`.panel`、可选 `.touch`、外部缓冲和时钟，不增加芯片专用 LVGL 绘图/输入包装。删除顺序：先 `lvgl_port_delete(&port)`，然后 `lcd_ili9881c_example_stop(&device, &board)`；该函数删除设备后 deinit 内嵌 IO，不释放 HAL。在途/被借用/停止失败时保留资源，继续服务并重试，不清零有效对象。
+
+本示例经过主机/真实 HAL 编译检查。2026-10-11 H757 配套屏幕消费工程使用相同通用组件通过显示/触摸与五次软件复位，具体范围见[组件 README](../../README.md)。板级工程使用自己的 DSI/LTDC 和软件 I2C 适配，不能将该结论当作本示例所有 HAL 操作或接线的实板验收。
